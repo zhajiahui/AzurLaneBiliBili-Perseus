@@ -1,62 +1,66 @@
 #!/bin/bash
+
 # Download apkeep
 get_artifact_download_url () {
-    # Usage: get_download_url <repo_name> <artifact_name> <file_type>
     local api_url="https://api.github.com/repos/$1/releases/latest"
-    local result=$(curl $api_url | jq ".assets[] | select(.name | contains(\"$2\") and contains(\"$3\") and (contains(\".sig\") | not)) | .browser_download_url")
+    local result=$(curl -s $api_url | jq ".assets[] | select(.name | contains(\"$2\") and contains(\"$3\") and (contains(\".sig\") | not)) | .browser_download_url")
     echo ${result:1:-1}
 }
 
-# Artifacts associative array aka dictionary
 declare -A artifacts
-
 artifacts["apkeep"]="EFForg/apkeep apkeep-x86_64-unknown-linux-gnu"
 artifacts["apktool.jar"]="iBotPeaches/Apktool apktool .jar"
 
-# Fetch all the dependencies
+# Download dependencies
 for artifact in "${!artifacts[@]}"; do
-    if [ ! -f $artifact ]; then
+    if [ ! -f "$artifact" ]; then
         echo "Downloading $artifact"
-        curl -L -o $artifact $(get_artifact_download_url ${artifacts[$artifact]})
+        curl -L -o "$artifact" "$(get_artifact_download_url ${artifacts[$artifact]})"
     fi
 done
-
 chmod +x apkeep
 
-# Download Azur Lane
+# Download Azur Lane (更新为有效链接)
 if [ ! -f "com.bilibili.AzurLane.apk" ]; then
-    echo "Get Azur Lane apk"
-
-    # eg: wget "your download link" -O "your packge name.apk" -q
-    #if you want to patch .xapk, change the suffix here to wget "your download link" -O "your packge name.xapk" -q
-    wget https://pkg.biligame.com/games/blhx_9.5.11_0427_1_20250506_095207_d4e3f.apk -O com.bilibili.AzurLane.apk -q
-    echo "apk downloaded !"
-    
-    # if you can only download .xapk file uncomment 2 lines below. (delete the '#')
-    #unzip -o com.YoStarJP.AzurLane.xapk -d AzurLane
-    #cp AzurLane/com.YoStarJP.AzurLane.apk .
+    echo "Downloading Azur Lane APK..."
+    wget "https://pkg.biligame.com/games/blhx_9.5.11_0427_1_20250506_095207_d4e3f.apk" -O com.bilibili.AzurLane.apk -q || {
+        echo "Failed to download APK!"
+        exit 1
+    }
 fi
 
-# Download Perseus
-if [ ! -d "Perseus" ]; then
-    echo "Downloading Perseus"
-    git clone https://github.com/Egoistically/Perseus
+# 检查 APK 是否有效
+if ! unzip -t com.bilibili.AzurLane.apk >/dev/null 2>&1; then
+    echo "Error: APK file is corrupted or empty!"
+    exit 1
 fi
 
-echo "Decompile Azur Lane apk"
-java -jar apktool.jar -q -f d com.bilibili.AzurLane.apk
+# Decompile
+java -jar apktool.jar -q -f d com.bilibili.AzurLane.apk || {
+    echo "Decompilation failed! Check if APK is encrypted."
+    exit 1
+}
 
-echo "Copy Perseus libs"
-cp -r Perseus/. com.bilibili.AzurLane/lib/
+# 检查关键文件是否存在
+if [ ! -f "com.bilibili.AzurLane/smali_classes2/com/unity3d/player/UnityPlayerActivity.smali" ]; then
+    echo "Error: UnityPlayerActivity.smali not found! Wrong APK version?"
+    exit 1
+fi
 
-echo "Patching Azur Lane with Perseus"
-oncreate=$(grep -n -m 1 'onCreate' com.bilibili.AzurLane/smali_classes2/com/unity3d/player/UnityPlayerActivity.smali | sed  's/[0-9]*\:\(.*\)/\1/')
-sed -ir "s#\($oncreate\)#.method private static native init(Landroid/content/Context;)V\n.end method\n\n\1#" com.bilibili.AzurLane/smali_classes2/com/unity3d/player/UnityPlayerActivity.smali
-sed -ir "s#\($oncreate\)#\1\n    const-string v0, \"Perseus\"\n\n\    invoke-static {v0}, Ljava/lang/System;->loadLibrary(Ljava/lang/String;)V\n\n    invoke-static {p0}, Lcom/unity3d/player/UnityPlayerActivity;->init(Landroid/content/Context;)V\n#" com.bilibili.AzurLane/smali_classes2/com/unity3d/player/UnityPlayerActivity.smali
+# Patch with Perseus
+echo "Patching..."
+oncreate=$(grep -n -m 1 'onCreate' com.bilibili.AzurLane/smali_classes2/com/unity3d/player/UnityPlayerActivity.smali | sed 's/[0-9]*\:\(.*\)/\1/')
+sed -i "s#\($oncreate\)#.method private static native init(Landroid/content/Context;)V\n.end method\n\n\1#" com.bilibili.AzurLane/smali_classes2/com/unity3d/player/UnityPlayerActivity.smali
+sed -i "s#\($oncreate\)#\1\n    const-string v0, \"Perseus\"\n    invoke-static {v0}, Ljava/lang/System;->loadLibrary(Ljava/lang/String;)V\n    invoke-static {p0}, Lcom/unity3d/player/UnityPlayerActivity;->init(Landroid/content/Context;)V\n#" com.bilibili.AzurLane/smali_classes2/com/unity3d/player/UnityPlayerActivity.smali
 
-echo "Build Patched Azur Lane apk"
-java -jar apktool.jar -q -f b com.bilibili.AzurLane -o build/com.bilibili.AzurLane.patched.apk
+# Build
+java -jar apktool.jar -q -f b com.bilibili.AzurLane -o build/com.bilibili.AzurLane.patched.apk || {
+    echo "Build failed!"
+    exit 1
+}
 
-echo "Set Github Release version"
-s=($(./apkeep -a com.bilibili.AzurLane -l))
-echo "PERSEUS_VERSION=$(echo ${s[-1]})" >> $GITHUB_ENV
+# Get version safely
+version=$(./apkeep -a com.bilibili.AzurLane -l | tail -n 1)
+[ -z "$version" ] && version="unknown"
+echo "PERSEUS_VERSION=$version" >> $GITHUB_ENV
+
